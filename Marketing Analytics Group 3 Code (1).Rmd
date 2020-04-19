@@ -1,0 +1,271 @@
+---
+title: "R Notebook"
+Name: Emily Curcio, Jaskaran Kohli, Xinyu (Duke) Li, Yijia Yang
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+  word_document: default
+---
+We separate all variable into six categories:
+
+1. date 
+2. browser, OS, device 
+3. Geography
+4. visits action(hits,pageviews,visit times...) 
+5. channel, medium, source
+6. adwords + campaign  
+
+```{r}
+rm(list=ls())
+library(tidyverse)
+library(jsonlite)
+library(scales)
+library(lubridate)
+library(gridExtra)
+library(data.table)
+library(caTools)
+library(caret)
+```
+#1 Loading
+```{r}
+train <- fread('train_flat.csv',stringsAsFactors = F)
+```
+
+```{r}
+colnames(train)
+dim(train)
+head(train)
+```
+#2 Data pre-processing
+##caculate NA
+```{r}
+is_na_val <- function(x) x %in% c("not available in demo dataset", "(not provided)",
+                                  "(not set)", "<NA>", "unknown.unknown",  "(none)",'Not Socially Engaged')
+```
+##100% NA colnames
+```{r}
+colna <- apply(train, 2, function(x) sum(is_na_val(x) | is.na(x)))
+colna
+col_names = names(colna[colna == 903653])
+col_names
+```
+##Remove 100% NA and subset USA
+```{r}
+colnames(train)
+train[,(col_names):= NULL]
+tr <- train[country == 'United States']
+head(tr)
+```
+##get buy column
+```{r}
+#method 1
+tr[is.na(transactionRevenue), buy := 0 ]
+tr[!is.na(transactionRevenue), buy := 1 ]
+tr[, buy := as.factor(buy)]
+
+#method 2
+#train$transactionRevenue[is.na(train$transactionRevenue)] <- 0
+#train$buy[train$transactionRevenue == 0] <- 0
+#train$buy[train$transactionRevenue != 0] <- 1
+#as.factor(train$buy)
+```
+##visit action: pageview na to 0
+```{r}
+tr[is.na(pageviews),pageviews:=0]
+```
+##visit action: pageview and hits highly correlated
+```{r}
+cor(tr$pageviews,tr$hits)
+```
+##visit action: change NA in newvisits to 0
+```{r}
+#method 1
+tr[is.na(newVisits),newVisits:=0]
+tr[,newVisits := as.factor(newVisits)]
+#method 2
+#train$newVisits[is.na(train$newVisits)] = 0
+#as.factor(train$newVisits)
+```
+##NA check again
+```{r}
+colna2 <- apply(tr, 2, function(x) sum(is.na(x)))
+colna2
+```
+##glance
+```{r}
+dim(tr)
+troriginal <- tr
+```
+##channel, medium, source: relationship bewteen medium - channel - source
+medium - channel:
+(none) = Direct    
+affiliate =  Affiliates
+cpc = Paid Search 
+cpm = Display
+organic = Organic Search 
+referral  =  Referral +  Social 
+
+Channel and medium are highly correlated (multicollinearity)
+Source shows more specific information for each channel(medium), so it should not be a variable originally
+I would choose channel as decision variable.
+```{r}
+#before
+table(tr$medium)
+table(tr$channelGrouping)
+unique(subset(tr,channelGrouping == 'Social')$medium)
+tr <- subset(tr,channelGrouping != '(Other)')
+```
+```{r}
+#after remove not set
+table(tr$channelGrouping)
+```
+##adwords + campaign: all adwords variables all belongs to Paid search
+```{r}
+unique(subset(tr,!is.na(adwordsClickInfo.page))$channelGrouping)
+```
+##adwords + campaign: campaign belongs to affilacte and paid search in Channel
+```{r}
+unique(subset(tr,campaign != '(not set)')$channelGrouping)
+#unique(subset(tr,campaign != '(not set)')$medium)
+#unique(subset(tr,campaign != '(not set)')$source)
+```
+so for the adwords and campaign are only relevant with partial channel, should not put into the whole model.
+#3 split train test
+```{r}
+tr$channelGrouping <- as.factor(tr$channelGrouping)
+set.seed(123)
+split = sample.split(tr$buy,SplitRatio = .8)
+traintr = subset(tr,split == TRUE)
+testtr = subset(tr,split == FALSE)
+head(traintr)
+```
+##check split
+```{r}
+table(month(tr$date))
+table(month(traintr$date))
+```
+##weekday
+```{r}
+traintr$weekday <- as.factor(wday(traintr$date))
+testtr$weekday <- as.factor(wday(testtr$date))
+table(traintr[buy == 1]$weekday)
+traintr[weekday %in% c(7),sunday:=1]
+traintr[weekday %in% c(1,2,3,4,5,6),sunday:=0]
+testtr[weekday %in% c(7),sunday:=1]
+testtr[weekday %in% c(1,2,3,4,5,6),sunday:=0]
+traintr[weekday %in% c(6,7),weekend:=1]
+traintr[weekday %in% c(1,2,3,4,5),weekend:=0]
+testtr[weekday %in% c(6,7),weekend:=1]
+testtr[weekday %in% c(1,2,3,4,5),weekend:=0]
+traintr$sunday <- as.factor(traintr$sunday)
+testtr$sunday <- as.factor(testtr$sunday)
+traintr$weekend <- as.factor(traintr$weekend)
+testtr$weekend <- as.factor(testtr$weekend)
+```
+##month
+```{r}
+traintr$month <- as.factor(month(traintr$date))
+testtr$month <- as.factor(month(testtr$date))
+table(traintr[buy == 1]$month)
+```
+##quarter
+```{r}
+traintr$quarter <- as.factor(quarter(traintr$date))
+testtr$quarter <- as.factor(quarter(testtr$date))
+table(traintr[buy == 1]$quarter)
+```
+##hour
+```{r}
+traintr$visitStartTime <- ymd_hms(traintr$visitStartTime)
+traintr$hour <- as.factor(hour(traintr$visitStartTime))
+testtr$hour <- as.factor(hour(testtr$visitStartTime))
+table(traintr[buy == 1]$hour)
+
+traintr[hour %in% c(0,1,2,3,4,5,6),ampm:=0]
+traintr[hour %in% 7:12,ampm:=1]
+traintr[hour %in% 13:18,ampm:=2]
+traintr[hour %in% 19:23,ampm:=3]
+traintr$ampm <- as.factor(traintr$ampm)
+testtr[hour %in% c(0,1,2,3,4,5,6),ampm:=0]
+testtr[hour %in% 7:12,ampm:=1]
+testtr[hour %in% 13:18,ampm:=2]
+testtr[hour %in% 19:23,ampm:=3]
+testtr$ampm <- as.factor(testtr$ampm)
+
+```
+##check views by channel
+```{r}
+tr[,.(viewsum = mean(hits)),by = channelGrouping]
+```
+##NA check
+```{r}
+traintr[is.na(traintr)] <- 0
+apply(traintr, 2, function(x) sum(is.na(x)))
+```
+##undersampling
+```{r}
+library(ROSE)
+undertrain <- ovun.sample(buy ~ ., data = traintr, method = "under", N = 17524, seed = 123)$data
+undertrain <- as.data.table(undertrain)
+table(undertrain$buy)
+```
+```{r}
+undertrain$deviceCategory = as.factor(undertrain$deviceCategory)
+head(undertrain)
+```
+#4 Logistic Regression Model
+```{r}
+undertrain$channelGrouping <- relevel(undertrain$channelGrouping,2)
+#bl_result1 = glm(buy~channelGrouping, data=undertrain, family="binomial")
+#bl_result2 = glm(buy~channelGrouping+hits+pageviews+newVisits, data=undertrain, family="binomial")
+#bl_result3 = glm(buy~channelGrouping+hits+pageviews+newVisits+deviceCategory, data=undertrain, family="binomial")
+#bl_result4 = glm(buy~channelGrouping+hits+pageviews+newVisits+deviceCategory+sunday, data=undertrain, family="binomial")
+#bl_result5 = glm(buy~channelGrouping+hits+pageviews+newVisits+deviceCategory+sunday+quarter, data=undertrain, family="binomial")
+#bl_result6 = glm(buy~channelGrouping+hits+pageviews+newVisits+deviceCategory+sunday+month, data=undertrain, family="binomial")
+#bl_result7 = glm(buy~channelGrouping+hits+pageviews+newVisits+deviceCategory+sunday+quarter+hour, data=undertrain, family="binomial")
+bl_result8 = glm(buy~channelGrouping+log(visitNumber)+log(pageviews+1)+deviceCategory+quarter+ampm, data=undertrain, family="binomial")
+#summary(bl_result1)
+#summary(bl_result2)
+#summary(bl_result3)
+#summary(bl_result4)
+#summary(bl_result5)
+#summary(bl_result6)
+#summary(bl_result7)
+summary(bl_result8)
+```
+##predict insample
+```{r}
+undertrain[,fittedval:=bl_result8$fitted.values]
+a=undertrain[,.(mnfit=mean(fittedval)),by=buy]
+a
+```
+#5 evaluation outsample 
+```{r}
+predTest = predict(bl_result8, testtr, type="response")
+predFac <- cut(predTest, breaks=c(-Inf, 0.5, Inf),labels=c("0","1"))
+confusionmatrix <- table(predFac,testtr$buy)
+accuracy <- sum(diag(confusionmatrix)) / sum(confusionmatrix)
+precision <- posPredValue(predFac,testtr$buy, positive="1")
+recall <- sensitivity(predFac,testtr$buy,positive="1")
+F1 <- (2 * precision * recall) / (precision + recall)
+```
+```{r}
+confusionmatrix
+accuracy
+precision
+recall
+F1
+```
+#7 Linear Regression
+```{r}
+ltraintr <- subset(traintr,traintr$transactionRevenue != 0)
+ltraintr
+```
+```{r}
+ll_result9 = lm(log(transactionRevenue)~channelGrouping+log(hits+1)+log(visitNumber)+deviceCategory+sunday+ampm, data=ltraintr)
+summary(ll_result9)
+```
+
+
+
